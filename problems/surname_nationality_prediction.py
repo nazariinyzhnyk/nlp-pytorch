@@ -3,33 +3,33 @@ from argparse import Namespace
 import os
 import torch
 
-from models import ReviewClassifier
-from text_preparation import ReviewDataset
+from models import SurnameClassifier
+from text_preparation import SurnameDataset
 import torch.nn as nn
 import torch.optim as optim
-from models import generate_batches, make_train_state, set_seed_everywhere, handle_dirs, compute_accuracy, \
-    update_train_state
+from models import generate_batches, make_train_state, set_seed_everywhere, handle_dirs, \
+    update_train_state, compute_accuracy_multiclass
+
 
 args = Namespace(
-    # Data and Path information
-    frequency_cutoff=25,
-    model_state_file='model.pth',
-    review_csv='../data/yelp/reviews_with_splits_lite.csv',
-    # review_csv='data/yelp/reviews_with_splits_full.csv',
-    save_dir='../model_storage/ch3/yelp/',
-    vectorizer_file='vectorizer.json',
-    # No Model hyper parameters
-    # Training hyper parameters
-    batch_size=128,
+    # Data and path information
+    surname_csv="../data/surnames/surnames_with_splits.csv",
+    vectorizer_file="vectorizer.json",
+    model_state_file="model.pth",
+    save_dir="model_storage/ch4/surname_mlp",
+    # Model hyper parameters
+    hidden_dim=300,
+    # Training  hyper parameters
+    seed=1337,
+    num_epochs=10,
     early_stopping_criteria=5,
     learning_rate=0.001,
-    num_epochs=10,  # 100
-    seed=1337,
+    batch_size=64,
     # Runtime options
-    catch_keyboard_interrupt=True,
     cuda=False,
+    reload_from_files=False,
     expand_filepaths_to_save_dir=True,
-    reload_from_files=False)
+)
 
 if args.expand_filepaths_to_save_dir:
     args.vectorizer_file = os.path.join(args.save_dir,
@@ -46,9 +46,9 @@ if args.expand_filepaths_to_save_dir:
 if not torch.cuda.is_available():
     args.cuda = False
 
-print("Using CUDA: {}".format(args.cuda))
-
 args.device = torch.device("cuda" if args.cuda else "cpu")
+
+print("Using CUDA: {}".format(args.cuda))
 
 # Set seed for reproducibility
 set_seed_everywhere(args.seed, args.cuda)
@@ -58,38 +58,42 @@ handle_dirs(args.save_dir)
 
 if args.reload_from_files:
     # training from a checkpoint
-    print("Loading dataset and vectorizer")
-    dataset = ReviewDataset.load_dataset_and_load_vectorizer(args.review_csv,
-                                                             args.vectorizer_file)
+    print("Reloading!")
+    dataset = SurnameDataset.load_dataset_and_load_vectorizer(args.surname_csv,
+                                                              args.vectorizer_file)
 else:
-    print("Loading dataset and creating vectorizer")
     # create dataset and vectorizer
-    dataset = ReviewDataset.load_dataset_and_make_vectorizer(args.review_csv)
+    print("Creating fresh!")
+    dataset = SurnameDataset.load_dataset_and_make_vectorizer(args.surname_csv)
     dataset.save_vectorizer(args.vectorizer_file)
-vectorizer = dataset.get_vectorizer()
 
-classifier = ReviewClassifier(num_features=len(vectorizer.review_vocab))
+vectorizer = dataset.get_vectorizer()
+classifier = SurnameClassifier(input_dim=len(vectorizer.surname_vocab),
+                               hidden_dim=args.hidden_dim,
+                               output_dim=len(vectorizer.nationality_vocab))
 
 classifier = classifier.to(args.device)
+dataset.class_weights = dataset.class_weights.to(args.device)
 
-loss_func = nn.BCEWithLogitsLoss()
+loss_func = nn.CrossEntropyLoss(dataset.class_weights)
 optimizer = optim.Adam(classifier.parameters(), lr=args.learning_rate)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                  mode='min', factor=0.5,
                                                  patience=1)
 
 train_state = make_train_state(args)
+
 dataset.set_split('train')
 dataset.set_split('val')
 
 try:
     for epoch_index in range(args.num_epochs):
-        print('{} epoch out of {}.'.format(epoch_index, args.num_epochs))
         train_state['epoch_index'] = epoch_index
 
         # Iterate over training dataset
 
         # setup: batch generator, set loss and acc to 0, set train mode on
+
         dataset.set_split('train')
         batch_generator = generate_batches(dataset,
                                            batch_size=args.batch_size,
@@ -106,10 +110,10 @@ try:
             optimizer.zero_grad()
 
             # step 2. compute the output
-            y_pred = classifier(x_in=batch_dict['x_data'].float())
+            y_pred = classifier(batch_dict['x_surname'])
 
             # step 3. compute the loss
-            loss = loss_func(y_pred, batch_dict['y_target'].float())
+            loss = loss_func(y_pred, batch_dict['y_nationality'])
             loss_t = loss.item()
             running_loss += (loss_t - running_loss) / (batch_index + 1)
 
@@ -120,14 +124,10 @@ try:
             optimizer.step()
             # -----------------------------------------
             # compute the accuracy
-            acc_t = compute_accuracy(y_pred, batch_dict['y_target'])
+            acc_t = compute_accuracy_multiclass(y_pred, batch_dict['y_nationality'])
             running_acc += (acc_t - running_acc) / (batch_index + 1)
 
             # update bar
-            # train_bar.set_postfix(loss=running_loss,
-            #                       acc=running_acc,
-            #                       epoch=epoch_index)
-            # train_bar.update()
 
         train_state['train_loss'].append(running_loss)
         train_state['train_acc'].append(running_acc)
@@ -145,15 +145,15 @@ try:
 
         for batch_index, batch_dict in enumerate(batch_generator):
             # compute the output
-            y_pred = classifier(x_in=batch_dict['x_data'].float())
+            y_pred = classifier(batch_dict['x_surname'])
 
             # step 3. compute the loss
-            loss = loss_func(y_pred, batch_dict['y_target'].float())
-            loss_t = loss.item()
+            loss = loss_func(y_pred, batch_dict['y_nationality'])
+            loss_t = loss.to("cpu").item()
             running_loss += (loss_t - running_loss) / (batch_index + 1)
 
             # compute the accuracy
-            acc_t = compute_accuracy(y_pred, batch_dict['y_target'])
+            acc_t = compute_accuracy_multiclass(y_pred, batch_dict['y_nationality'])
             running_acc += (acc_t - running_acc) / (batch_index + 1)
 
         train_state['val_loss'].append(running_loss)
@@ -170,10 +170,11 @@ try:
 except KeyboardInterrupt:
     print("Exiting loop")
 
-# compute the loss & accuracy on the test set using the best available model
-
 classifier.load_state_dict(torch.load(train_state['model_filename']))
+
 classifier = classifier.to(args.device)
+dataset.class_weights = dataset.class_weights.to(args.device)
+loss_func = nn.CrossEntropyLoss(dataset.class_weights)
 
 dataset.set_split('test')
 batch_generator = generate_batches(dataset,
@@ -185,74 +186,79 @@ classifier.eval()
 
 for batch_index, batch_dict in enumerate(batch_generator):
     # compute the output
-    y_pred = classifier(x_in=batch_dict['x_data'].float())
+    y_pred = classifier(batch_dict['x_surname'])
 
     # compute the loss
-    loss = loss_func(y_pred, batch_dict['y_target'].float())
+    loss = loss_func(y_pred, batch_dict['y_nationality'])
     loss_t = loss.item()
     running_loss += (loss_t - running_loss) / (batch_index + 1)
 
     # compute the accuracy
-    acc_t = compute_accuracy(y_pred, batch_dict['y_target'])
+    acc_t = compute_accuracy_multiclass(y_pred, batch_dict['y_nationality'])
     running_acc += (acc_t - running_acc) / (batch_index + 1)
 
 train_state['test_loss'] = running_loss
 train_state['test_acc'] = running_acc
 
-print("Test loss: {:.3f}".format(train_state['test_loss']))
-print("Test Accuracy: {:.2f}".format(train_state['test_acc']))
+print("Test loss: {};".format(train_state['test_loss']))
+print("Test Accuracy: {}".format(train_state['test_acc']))
 
 
-def preprocess_text(text):
-    text = text.lower()
-    text = re.sub(r"([.,!?])", r" \1 ", text)
-    text = re.sub(r"[^a-zA-Z.,!?]+", r" ", text)
-    return text
-
-
-def predict_rating(review, classifier, vectorizer, decision_threshold=0.5):
-    """Predict the rating of a review
+def predict_nationality(surname, classifier, vectorizer):
+    """Predict the nationality from a new surname
 
     Args:
-        review (str): the text of the review
-        classifier (ReviewClassifier): the trained model
-        vectorizer (ReviewVectorizer): the corresponding vectorizer
-        decision_threshold (float): The numerical boundary which separates the rating classes
+        surname (str): the surname to classifier
+        classifier (SurnameClassifer): an instance of the classifier
+        vectorizer (SurnameVectorizer): the corresponding vectorizer
+    Returns:
+        a dictionary with the most likely nationality and its probability
     """
-    review = preprocess_text(review)
+    vectorized_surname = vectorizer.vectorize(surname)
+    vectorized_surname = torch.tensor(vectorized_surname).view(1, -1)
+    result = classifier(vectorized_surname, apply_softmax=True)
 
-    vectorized_review = torch.tensor(vectorizer.vectorize(review))
-    result = classifier(vectorized_review.view(1, -1))
+    probability_values, indices = result.max(dim=1)
+    index = indices.item()
 
-    probability_value = torch.sigmoid(result).item()
-    index = 1
-    if probability_value < decision_threshold:
-        index = 0
+    predicted_nationality = vectorizer.nationality_vocab.lookup_index(index)
+    probability_value = probability_values.item()
 
-    return vectorizer.rating_vocab.lookup_index(index)
+    return {'nationality': predicted_nationality, 'probability': probability_value}
 
 
-test_review = "this is a pretty awesome book"
+def predict_topk_nationality(name, classifier, vectorizer, k=5):
+    vectorized_name = vectorizer.vectorize(name)
+    vectorized_name = torch.tensor(vectorized_name).view(1, -1)
+    prediction_vector = classifier(vectorized_name, apply_softmax=True)
+    probability_values, indices = torch.topk(prediction_vector, k=k)
 
-classifier = classifier.cpu()
-prediction = predict_rating(test_review, classifier, vectorizer, decision_threshold=0.5)
-print("{} -> {}".format(test_review, prediction))
+    # returned size is 1,k
+    probability_values = probability_values.detach().numpy()[0]
+    indices = indices.detach().numpy()[0]
 
-fc1_weights = classifier.fc1.weight.detach()[0]
-_, indices = torch.sort(fc1_weights, dim=0, descending=True)
-indices = indices.numpy().tolist()
+    results = []
+    for prob_value, index in zip(probability_values, indices):
+        nationality = vectorizer.nationality_vocab.lookup_index(index)
+        results.append({'nationality': nationality,
+                        'probability': prob_value})
 
-# Top 20 words
-print("Influential words in Positive Reviews:")
-print("--------------------------------------")
-for i in range(20):
-    print(vectorizer.review_vocab.lookup_index(indices[i]))
+    return results
 
-print("====\n\n\n")
 
-# Top 20 negative words
-print("Influential words in Negative Reviews:")
-print("--------------------------------------")
-indices.reverse()
-for i in range(20):
-    print(vectorizer.review_vocab.lookup_index(indices[i]))
+new_surname = input("Enter a surname to classify: ")
+classifier = classifier.to("cpu")
+
+k = int(input("How many of the top predictions to see? "))
+if k > len(vectorizer.nationality_vocab):
+    print("Sorry! That's more than the # of nationalities we have.. defaulting you to max size :)")
+    k = len(vectorizer.nationality_vocab)
+
+predictions = predict_topk_nationality(new_surname, classifier, vectorizer, k=k)
+
+print("Top {} predictions:".format(k))
+print("===================")
+for prediction in predictions:
+    print("{} -> {} (p={:0.2f})".format(new_surname,
+                                        prediction['nationality'],
+                                        prediction['probability']))

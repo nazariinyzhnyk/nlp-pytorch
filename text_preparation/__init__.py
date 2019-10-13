@@ -1,3 +1,5 @@
 from text_preparation.review_vectorizer import ReviewVectorizer
 from text_preparation.review_dataset import ReviewDataset
 from text_preparation.vocabulary import Vocabulary
+from text_preparation.surname_vectorizer import SurnameVectorizer
+from text_preparation.surname_dataset import SurnameDataset
